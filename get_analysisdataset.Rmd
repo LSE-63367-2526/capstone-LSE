@@ -1,0 +1,150 @@
+---
+title: "Capstone - Create Analysis Dataset"
+subtitle: "Filter comments and replies posted after the Indonesian Presidential Election voting day and exclude videos with fewer than 10 total comments"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_knit$set(
+  root.dir = "C:/Users/cheow/OneDrive - London School of Economics/Capstone/Data"
+)
+```
+
+
+### Directory Management
+```{r}
+# Tell R my home folder
+Sys.setenv(R_USER = "C:/Users/cheow/OneDrive - London School of Economics") 
+
+# Specify directory 
+wdir <- file.path(Sys.getenv("R_USER"), "Capstone")
+
+# Sub-directory - to store data
+ddir <- file.path(wdir, "Data")
+if(!dir.exists(ddir)){
+  dir.create(ddir)
+}
+```
+
+
+### Install the packages
+```{r}
+# Check and install missing packages automatically
+required_packages <- c("dplyr", "lubridate", "kableExtra")
+
+for (pkg in required_packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    message("Installing missing package: ", pkg)
+    install.packages(pkg)
+  }
+}
+```
+
+
+### Library
+```{r}
+library(dplyr)
+library(lubridate)
+library(kableExtra)
+```
+
+
+### Load full comments CSV file and reformat date for subsequent filtering steps 
+```{r}
+master_df_videos <- read.csv(
+  file.path(ddir, "comments_all_playlists.csv"),
+  stringsAsFactors = FALSE
+) %>%
+  mutate(
+    published_at = as_datetime(published_at),
+    date         = as.Date(published_at)
+  )
+```
+
+
+### Filter comments (keep only comments/replies posted before 15 Feb 2024)
+```{r}
+# Voting date of Indonesian Presidential Election - 14 Feb 2024
+analysis_df_videos <- master_df_videos %>%
+  filter(date < as.Date("2024-02-15"))
+```
+
+
+### Verify 
+```{r}
+message("Total rows (master)    : ", nrow(master_df_videos))
+message("Rows kept (pre-voting day)   : ", nrow(analysis_df_videos))
+message("Rows dropped (post-voting day)    : ", nrow(master_df_videos) - nrow(analysis_df_videos))
+message("Date range kept        : ", min(analysis_df_videos$date), " → ", max(analysis_df_videos$date))
+```
+
+### Filter out videos with less than 10 comments
+```{r}
+analysis_df_videos <- analysis_df_videos %>%
+  group_by(video_id) %>%
+  filter(n() >= 10) %>%
+  ungroup()
+```
+
+
+### Save the dataset for all future analysis
+```{r}
+write.csv(analysis_df_videos,
+          file.path(ddir, "videos_comments_analysis.csv"),
+          row.names = FALSE)
+
+message("Saved: ", nrow(analysis_df_videos), " rows → videos_comments_analysis.csv")
+```
+
+
+### Summary Statistics
+```{r}
+
+debate_labels <- c(
+  debate1 = "First Presidential Debate",  debate2 = "Second Presidential Debate",
+  debate3 = "Third Presidential Debate",  debate4 = "Fourth Presidential Debate",
+  debate5 = "Fifth Presidential Debate"
+)
+
+videos_per_playlist <- analysis_df_videos %>%
+  group_by(playlist_name) %>%
+  summarise(n = n_distinct(video_id), .groups = "drop") %>%
+  mutate(playlist_name = debate_labels[playlist_name])
+
+data.frame(
+  Statistic = c(
+    "Total observations", "Top-level comments", "Replies",
+    "Unique videos", "Unique users", "Date range (start)", "Date range (end)",
+    paste0("", videos_per_playlist$playlist_name)
+  ),
+  Value = c(
+    format(nrow(analysis_df_videos),                            big.mark = ""),
+    format(sum(analysis_df_videos$comment_type == "top_level"), big.mark = ","),
+    format(sum(analysis_df_videos$comment_type == "reply"),     big.mark = ","),
+    format(n_distinct(analysis_df_videos$video_id),             big.mark = ","),
+    format(n_distinct(analysis_df_videos$author_anon),          big.mark = ","),
+    format(min(analysis_df_videos$date)), format(max(analysis_df_videos$date)),
+    format(videos_per_playlist$n, big.mark = ",")
+  )
+) %>%
+  kable(col.names = c("", ""), align = c("l", "r"),
+        booktabs = TRUE, escape = FALSE,
+        caption = "Descriptive Statistics of the collected YouTube comments") %>%
+  kable_styling(latex_options = "hold_position", full_width = FALSE) %>%
+  pack_rows("Sample Composition",  1, 3) %>%
+  pack_rows("Coverage",            4, 7) %>%
+  pack_rows("Videos per Playlist", 8, 7 + nrow(videos_per_playlist))
+
+```
+
+
+
+### Updated video-level statistics (videos used for analysis) 
+```{r}
+analysis_video_stat <- read.csv(file.path(ddir, "video_stats.csv"), stringsAsFactors = FALSE) %>%
+  filter(video_id %in% unique(analysis_df_videos$video_id))
+
+write.csv(analysis_video_stat, file.path(ddir, "analysis_video_stats.csv"), row.names = FALSE)
+message("Stats saved: ", nrow(analysis_video_stat), " videos")
+print(analysis_video_stat[, c("playlist_name", "video_title", "view_count", "comment_count", "like_count")])
+```
