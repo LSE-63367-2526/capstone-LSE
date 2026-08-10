@@ -1,0 +1,569 @@
+---
+title: "Capstone - Identification of Potential Buzzer Accounts (Behavioural Analysis)"
+subtitle: "A multi-pronged approach for identifying potential Indonesian political buzzers in YouTube Videos"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_knit$set(
+  root.dir = "C:/Users/cheow/OneDrive - London School of Economics/Capstone/Data"
+)
+```
+
+
+## Directory Management
+```{r}
+# Tell R my home folder
+Sys.setenv(R_USER = "C:/Users/cheow/OneDrive - London School of Economics") 
+
+# Specify directory 
+wdir <- file.path(Sys.getenv("R_USER"), "Capstone")
+
+# Sub-directory - to store data
+ddir <- file.path(wdir, "Data")
+if(!dir.exists(ddir)){
+  dir.create(ddir)
+}
+```
+
+
+## Install the packages
+```{r}
+# Check and install missing packages automatically
+required_packages <- c("dplyr", "ggplot2", "purrr", "tibble", "scales", "patchwork")
+
+for (pkg in required_packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    message("Installing missing package: ", pkg)
+    install.packages(pkg)
+  }
+}
+```
+
+
+## Library
+```{r}
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(purrr)
+library(tibble)
+library(scales)
+library(patchwork)
+
+```
+
+## Visualisation Setup (consistent with LaTeX formatting)
+```{r}
+theme_capstone <- theme_minimal(base_size = 12) +
+  theme(
+    text = element_text(
+      family = "serif",
+      colour = "black"
+    ),
+
+    plot.title = element_text(
+      family = "serif",
+      face = "bold",
+      size = 13,
+      colour = "black",
+      margin = margin(b = 4)
+    ),
+
+    plot.subtitle = element_text(
+      family = "serif",
+      size = 9.5,
+      colour = "grey30",
+      margin = margin(b = 8)
+    ),
+
+    axis.title = element_text(
+      family = "serif",
+      size = 10,
+      colour = "black"
+    ),
+
+    axis.text = element_text(
+      family = "serif",
+      size = 9,
+      colour = "black"
+    ),
+
+    panel.grid.major.x = element_blank(),
+
+    panel.grid.major.y = element_line(
+      colour = "grey88",
+      linewidth = 0.3
+    ),
+
+    panel.grid.minor = element_blank(),
+
+    panel.border = element_blank(),
+
+    axis.line = element_line(
+      colour = "black",
+      linewidth = 0.3
+    ),
+
+    plot.background = element_blank(),
+    panel.background = element_blank()
+  )
+```
+
+## Load the filered dataset for analysis dataset
+```{r}
+analysis_df_videos <- read.csv(file.path(ddir, "videos_comments_analysis.csv"),
+                                stringsAsFactors = FALSE) %>%
+  mutate(published_at = as_datetime(published_at),
+         date         = as.Date(published_at))
+```
+
+
+## Multi-pronged Approach - first, sort users by posting time 
+```{r}
+analysis_sorted_df_videos <- analysis_df_videos %>%
+  arrange(author_anon, published_at)
+
+# Save as RDS to preserve date column types without needing to re-parse them on load
+# Also, keep intermediate files distinct from the final outputs
+saveRDS(analysis_sorted_df_videos, file.path(ddir, "analysis_sorted_videos.rds"))
+message("Sorted: ", nrow(analysis_sorted_df_videos), " rows")
+```
+
+
+## Multi-pronged approach - Feature 1a: Calculate the average inter-event time of all comments (referenced Kim & Jo (2016))
+```{r}
+# Population standard deviation (divide by n) is required by Kim & Jo (2016) formula.
+# R's sd() uses sample standard deviation (i.e. divide by n-1), which inflates r beyond its theoretical maximum and breaks the [-1, 1] bound of Kim and Jo's (2016) burstiness measure, hence we need to define our own population sd function. The population sd is most appropriate for our use case since our inter-event times represent the complete record of a user's activity during the campaigning period.  
+
+pop_sd <- function(x) {
+  if (length(x) < 1) NA_real_ else sqrt(mean((x - mean(x))^2))
+}
+
+# Both top-level and replies are included, distinguished by the absence of parent_id in top-level comments.
+# Indicate users with only 1 comment - of which Kim and Jo's burstiness measure cannot be applied.
+user_features_df_videos <- analysis_sorted_df_videos %>%
+  group_by(author_anon) %>%
+  summarise(
+    n_comments         = n(),
+    n_toplevel         = sum(is.na(parent_id)),
+    n_replies          = sum(!is.na(parent_id)),
+    first_comment_date = min(date),
+    last_comment_date  = max(date),
+    iet_vec            = list(diff(as.numeric(published_at))),
+    .groups            = "drop"
+  ) %>%
+  mutate(
+    mean_iet_secs = map_dbl(iet_vec, ~ if (length(.x) >= 1) mean(.x)    else NA_real_),
+    sd_iet_secs   = map_dbl(iet_vec, ~ if (length(.x) >= 1) pop_sd(.x)  else NA_real_)
+  ) %>%
+  select(-iet_vec)
+
+saveRDS(user_features_df_videos, file.path(ddir, "user_features_f1.rds"))
+message("Feature 1 done: ", nrow(user_features_df_videos), " users")
+message("NA mean_iet (single comment only): ", sum(is.na(user_features_df_videos$mean_iet_secs)))
+
+```
+
+
+### Multi-pronged approach - Feature 1b: Measure of Burstiness (referenced Kim & Jo (2016))
+```{r}
+# n_iet   = number of inter-event times
+# r   = sd / mean of inter-event times (coefficient of variation)
+# Requires n_iet >= 2 (i.e., n_comments >= 3) to have a defined sd.
+
+# Compute n_iet and r 
+user_features_df_videos <- user_features_df_videos %>%
+  mutate(
+    n_iet = n_comments - 1,
+    r     = sd_iet_secs / mean_iet_secs
+  )
+
+```
+
+```{r}
+# Inspect n_iet thresholds (diagnostic) 
+for (t in c(2, 3, 5, 10)) {
+  vals <- user_features_df_videos %>%
+    mutate(burst_t = case_when(
+      n_iet < t     ~ NA_real_,
+      !is.finite(r) ~ NA_real_,
+      TRUE ~ (sqrt(n_iet + 1) * r - sqrt(n_iet - 1)) /
+             ((sqrt(n_iet + 1) - 2) * r + sqrt(n_iet - 1))
+    )) %>%
+    pull(burst_t)
+
+  cat("\n── n_iet >=", t, "(n_comments >=", t + 1, ") ──\n")
+  cat("Users included:       ", sum(!is.na(vals)), "\n")
+  cat("Users excluded:       ", sum(is.na(vals)), "\n")
+  cat("Exact ceiling (= 1.0):", sum(vals == 1, na.rm = TRUE), "\n")
+  cat("Range: [", round(min(vals, na.rm = TRUE), 3),
+      ",", round(max(vals, na.rm = TRUE), 3), "]\n")
+  print(summary(vals))
+}
+
+# Select n_iet >= 3 (n_comments >= 4) as the threshold — it retains the most users while ensuring that the full [-1, 1] range is covered, and there are only a few ceiling cases (i.e. 4). 
+
+```
+
+```{r}
+# Set selected threshold (n_iet >= 3) based on diagnostic output above
+chosen_t <- 3
+
+# Compute burstiness
+user_features_df_videos <- user_features_df_videos %>%
+  mutate(
+    burstiness = case_when(
+      n_iet < chosen_t ~ NA_real_,
+      !is.finite(r)    ~ NA_real_,
+      TRUE ~ (sqrt(n_iet + 1) * r - sqrt(n_iet - 1)) /
+             ((sqrt(n_iet + 1) - 2) * r + sqrt(n_iet - 1))
+    )
+  )
+
+saveRDS(user_features_df_videos, file.path(ddir, "user_features_f1b.rds"))
+message("Burstiness computed: ", sum(!is.na(user_features_df_videos$burstiness)), " users")
+message("Excluded (n_iet < ", chosen_t, "): ", sum(user_features_df_videos$n_iet < chosen_t))
+
+```
+
+### Summary Statistics - Examine burstiness distribution
+```{r}
+# Burstiness is only applicable for 6829 out of 80342 users
+
+summary(user_features_df_videos$burstiness)
+cat("Users with burstiness = 1.0:", sum(user_features_df_videos$burstiness == 1, na.rm = TRUE), "\n")
+cat("Users with burstiness > 0.9:", sum(user_features_df_videos$burstiness > 0.9, na.rm = TRUE), "\n")
+
+# Distribution by n_comments band
+user_features_df_videos %>%
+  filter(!is.na(burstiness)) %>%
+  mutate(n_band = cut(n_comments,
+                      breaks = c(3, 5, 10, 20, 50, Inf),
+                      labels = c("3-4", "5-9", "10-19", "20-49", "50+"),
+                      right  = FALSE)) %>%
+  group_by(n_band) %>%
+  summarise(
+    n_users    = n(),
+    mean_burst = round(mean(burstiness), 3),
+    pct_at_1   = round(mean(burstiness == 1) * 100, 1)
+  ) %>%
+  print()
+```
+
+### Burstiness Plot (To be uploaded for capstone)
+```{r}
+ggplot(tibble(x = burst_vals), aes(x = x)) +
+  geom_histogram(bins   = 40,
+                 fill = "#4F6475",
+                 colour = "white",
+                 alpha  = 0.8) +
+  labs(
+    title    = "Distribution of Burstiness Scores among YouTube Commenters",
+    subtitle = paste0("n = ", length(burst_vals),
+                      " users (number of comments >= 4)  |",
+                      "  Median = 0.573 "),
+    x        = "Burstiness Score",
+    y        = "Number of Users",
+  ) +
+  theme_capstone
+
+ggsave(
+   "burstiness_distribution_capstone.pdf",
+   width = 6.2,
+   height = 4.2,
+   units = "in"
+ )
+```
+
+## Multi-pronged approach - Feature 2: Total comment count per user (+ reply ratio)
+```{r}
+user_features_df_videos <- user_features_df_videos %>%
+  mutate(
+    reply_ratio = n_replies / n_comments
+  )
+
+saveRDS(user_features_df_videos, file.path(ddir, "user_features_f2.rds"))
+message("Feature 2 added: ", nrow(user_features_df_videos), " users")
+```
+
+```{r}
+# Check maximum number of comments for x-axis scaling in histogram
+max(user_features_df_videos$n_comments)
+summary(user_features_df_videos$n_comments)
+```
+
+### Summary Statistics - Histogram 
+```{r}
+# This histogram includes both top-level comments and replies
+
+# Total comment count distribution
+ggplot(user_features_df_videos, aes(x = n_comments)) +
+  geom_histogram(bins = 40, fill = "#4F6475", colour = "white") +
+  geom_vline(xintercept = 13, linetype = "dashed",
+             colour = "black", linewidth = 0.8) +
+  annotate("text", x = 13, y = Inf,
+           label = "99th percentile (n = 13)",
+           vjust = 1.5, hjust = -0.1, size = 3) +
+  scale_x_log10(
+    breaks = c(1, 2, 5, 10, 20, 50),
+    labels = c("1", "2", "5", "10", "20", "50")
+  ) +
+  labs(
+    title    = "Distribution of Total Comment Count per User",
+    subtitle = paste0("n = ", nrow(user_features_df_videos),
+                      " users  |  Median = 1  |  Max = 242"),
+    x        = "Total Number of Comments Posted (log10 scale)",
+    y        = "Number of Users"
+  ) +
+  theme_capstone
+```
+
+### Compute percentile thresholds
+```{r}
+p90 <- quantile(user_features_df_videos$n_comments, 0.90)
+p95 <- quantile(user_features_df_videos$n_comments, 0.95)
+p99 <- quantile(user_features_df_videos$n_comments, 0.99)
+
+message("90th percentile: ", p90)
+message("95th percentile: ", p95)
+message("99th percentile: ", p99)
+```
+
+### Summary Statistics - Histogram With percentile to decide the cut-off threshold
+```{r}
+
+ggplot(user_features_df_videos, aes(x = n_comments)) +
+  geom_histogram(bins = 40, fill = "steelblue", colour = "white") +
+  geom_vline(xintercept = p90, linetype = "dashed",
+             colour = "firebrick", linewidth = 0.8) +
+  geom_vline(xintercept = p95, linetype = "dotted",
+             colour = "firebrick", linewidth = 0.8) +
+  geom_vline(xintercept = p99, linetype = "solid",
+             colour = "firebrick", linewidth = 0.8) +
+  annotate("text", x = p90, y = Inf,
+           label = paste0("90th (", p90, ")"),
+           colour = "firebrick", angle = 90,
+           vjust = -0.3, hjust = 1.2, size = 3) +
+  annotate("text", x = p95, y = Inf,
+           label = paste0("95th (", p95, ")"),
+           colour = "firebrick", angle = 90,
+           vjust = -0.3, hjust = 1.2, size = 3) +
+  annotate("text", x = p99, y = Inf,
+           label = paste0("99th (", p99, ")"),
+           colour = "firebrick", angle = 90,
+           vjust = -0.3, hjust = 1.2, size = 3) +
+  scale_x_log10(
+    breaks = c(1, 2, 5, 10, 20, 50, 100, 242),
+    labels = c("1", "2", "5", "10", "20", "50", "100", "242")
+  ) +
+  labs(
+    title    = "Distribution of Total Comment Count per User",
+    subtitle = paste0("Median = 1  |  Mean = 1.95  |  Max = 242  |  n = ",
+                      nrow(user_features_df_videos), " users"),
+    caption  = "Dashed = 90th  |  Dotted = 95th  |  Solid = 99th percentile",
+    x        = "Total comments posted (log10 scale)",
+    y        = "Number of users"
+  ) +
+  theme_capstone
+
+```
+
+### Cleaned Total Comment Count Plot (To be uploaded for capstone)
+```{r}
+# ── Main plot: linear scale 1-15 ─────────────────────────────────────────────────────────────────
+p_main <- ggplot(user_features_df_videos %>% filter(n_comments <= 15),
+                 aes(x = n_comments)) +
+  geom_histogram(bins = 15, fill = "#4F6475", colour = "white") +
+  annotate("segment",
+           x = 13, xend = 13, y = 0, yend = 19000,
+           linetype = "dashed", colour = "black", linewidth = 0.6) +
+  annotate("text",
+         x     = 12.8,          # Moved position to the left of the line
+         y     = 19000,
+         label = "99th Percentile (>= 13 comments)",
+         hjust = 1,             # Right-aligns text so it builds to the left
+         size  = 3,
+         family = "serif") +
+  scale_x_continuous(breaks = 1:15) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title    = "Distribution of Total Comment Counts per YouTube User",
+    subtitle = paste0("n = ", nrow(user_features_df_videos),
+                      " users  |  Max = 242 comments"),
+    x        = "Total Number of Comments",
+    y        = "Number of Users"
+  ) +
+  theme_capstone +
+  theme(
+    axis.title.x = element_text(margin = margin(t = 3), family = "serif"),
+    axis.title.y = element_text(margin = margin(r = 3), family = "serif"),
+    axis.text    = element_text(family = "serif")
+  )
+
+# ── Inset plot ─────────────────────────────────────────────────────────────────
+p_inset <- ggplot(user_features_df_videos, aes(x = n_comments)) +
+  geom_histogram(bins = 40, fill = "#4F6475", colour = "white", alpha = 0.8) +
+  geom_vline(xintercept = 13, linetype = "dashed",
+             colour = "black", linewidth = 0.6) +
+  scale_x_log10(breaks = c(1, 10, 100),
+                labels = c("1", "10", "100")) +
+  scale_y_continuous(breaks = c(0, 20000, 40000), 
+                     labels = c("0", "20k", "40k")) + 
+  # CHANGED: Removed y-label to avoid crowding; matched x-label text style
+  labs(x = "Total Number of Comments (log10)", y = NULL) +
+  theme_capstone +
+  theme(
+    plot.background  = element_rect(fill = "white", colour = "grey70"),
+    axis.text        = element_text(size = 7, family = "serif"),
+    axis.title       = element_text(size = 7, family = "serif"),
+    axis.title.y     = element_text(margin = margin(r = 5)),
+    plot.title       = element_blank(),
+    plot.subtitle    = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+# ── Combine ────────────────────────────────────────────────────────────────────
+p_main + inset_element(p_inset,
+                        left   = 0.55,
+                        bottom = 0.45,
+                        right  = 0.98,
+                        top    = 0.98)
+
+ggsave(
+  "totalcomments_distribution_capstone.pdf",
+  width = 6.2,
+  height = 4.2,
+  units = "in"
+)
+```
+
+## Multi-pronged approach - Feature 3: User activity from the first debate to the voting day 
+```{r}
+# Inspired by Ibrahim et. al. (2015) 
+# To examine whether an account was only activated close to election day
+# Not informative since it is natural that the presidential debate livestream date will capture the highest user activity 
+# NOT USED in final triangulation
+
+election_day <- as.Date("2024-02-14")
+
+user_features_df_videos <- user_features_df_videos %>%
+  mutate(
+    days_before_election = as.numeric(election_day - first_comment_date)
+  )
+
+write.csv(user_features_df_videos, file.path(ddir, "user_features_videos.csv"), row.names = FALSE)
+message("Feature 3 added. Saved: user_features_videos.csv — ", nrow(user_features_df_videos), " rows")
+
+```
+
+
+### Summary Statistics - User activity from the first debate to the voting day
+```{r}
+ggplot(user_features_df_videos %>% filter(!is.na(days_before_election)),
+       aes(x = days_before_election)) +
+  geom_histogram(bins = 40, fill = "steelblue", colour = "white") +
+  labs(
+    title = "Feature 3: User Activity Window Before Election",
+    x     = "Days between first comment and election day (14 Feb 2024)",
+    y     = "Number of users"
+  ) +
+  theme_capstone
+```
+
+
+## Flagging out potential buzzer-like account by specifying per-feature threshold (Feature 3 is excluded)
+```{r}
+# Compute per-feature thresholds and binary flags
+
+# Feature 1: upper tail (high burstiness = buzzer-like)
+# Burstiness - 90th percentile (based on the histogram)
+t_burst <- quantile(user_features_df_videos$burstiness, 0.90, na.rm = TRUE)
+
+# Feature 2: upper tail (high daily frequency = buzzer-like)
+# Daily comment frequency - 99th percentile
+t_freq  <- quantile(user_features_df_videos$n_comments, 0.99, na.rm = TRUE)
+
+message("Threshold — Burstiness   >= ", round(t_burst,  3))
+message("Threshold — Daily freq   >= ", round(t_freq,   3))
+
+user_features_df_videos <- user_features_df_videos %>%
+  mutate(
+    flag_f1 = case_when(
+      is.na(burstiness)       ~ NA,          # excluded (n_comments < 4)
+      burstiness >= t_burst   ~ TRUE,
+      TRUE                    ~ FALSE
+    ),
+    flag_f2 = n_comments >= t_freq,
+  )
+
+message("Flag F1 (burstiness):    ", sum(user_features_df_videos$flag_f1, na.rm = TRUE), " users flagged")
+message("Flag F2 (daily freq):    ", sum(user_features_df_videos$flag_f2, na.rm = TRUE), " users flagged")
+
+```
+
+```{r}
+# Combine both feature flags for buzzer classifications
+
+# NA in flag_f1 propagates to both combined flags — users without a burstiness
+# score (n_comments < 4) are treated as unclassifiable, rather than non-buzzers.
+
+user_features_df_videos <- user_features_df_videos %>%
+  mutate(
+    buzzer_f1f2 = flag_f1 & flag_f2
+  )
+
+message("Buzzer (F1 & F2):        ", sum(user_features_df_videos$buzzer_f1f2, na.rm = TRUE), " users")
+message("Unclassifiable (no burstiness score): ",
+        sum(is.na(user_features_df_videos$flag_f1)), " users")
+```
+
+```{r}
+# View buzzer accounts and their comments
+buzzers_videos_df <- user_features_df_videos %>%
+  filter(buzzer_f1f2 == TRUE) %>%
+  arrange(desc(burstiness), desc(n_comments)) %>%
+  select(author_anon, n_comments, n_toplevel, n_replies,
+         burstiness, n_comments)
+
+message("Total buzzers identified: ", nrow(buzzers_videos_df))
+print(buzzers_videos_df)
+
+buzzer_comments_df_video <- analysis_sorted_df_videos %>%
+  filter(author_anon %in% buzzers_videos_df$author_anon) %>%
+  arrange(author_anon, published_at)
+
+message("Total comments by buzzers: ", nrow(buzzer_comments_df_video))
+message("Unique buzzers:            ", n_distinct(buzzer_comments_df_video$author_anon))
+
+print(buzzer_comments_df_video)
+
+write.csv(buzzer_comments_df_video, file.path(ddir, "buzzer_comments_videos.csv"), row.names = FALSE)
+message("Saved: buzzer_comments_videos.csv")
+```
+
+
+## Check the 90th, 95th and 99th quantiles of burstiness and total comment count
+```{r}
+cat("Burstiness:\n")
+quantile(user_features_df_videos$burstiness,         c(0.90, 0.95, 0.99), na.rm = TRUE)
+cat("Daily comment frequency:\n")
+quantile(user_features_df_videos$n_comments, c(0.90, 0.95, 0.99), na.rm = TRUE)
+
+```
+
+```{r}
+quantile(user_features_df_videos$burstiness, 
+         c(0.50, 0.60, 0.70, 0.80, 0.90), na.rm = TRUE)
+```
+```{r}
+# Diagnose the difference
+user_features_df_videos %>%
+  filter(flag_f2 == TRUE) %>%
+  summarise(
+    n_flag_f2        = n(),
+    n_also_f1        = sum(buzzer_f1f2, na.rm = TRUE),
+    n_f1_na          = sum(is.na(flag_f1)),
+    n_f1_false       = sum(flag_f1 == FALSE, na.rm = TRUE)
+  )
+```
