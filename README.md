@@ -18,7 +18,7 @@ Details of the markdown files and codebooks in this repo are as follows:
 
 - "indobertweet_inference_full.ipynb" - This .ipynb file contains the code used to apply the fine-tuned models generated in "indobertweet-polar-full-kaggle-final.ipynb" and "indobertweet-toxic-full-kaggle-final.ipynb" to the collected comments. The code performs threshold tuning and classifies comments as polarising and/or toxic. 
 
-- "videos_stats.pdf" = This .pdf file contains the video-level statistics of each YouTube video from which comments were collected. 
+- "videos_stats.pdf" - This .pdf file contains the video-level statistics of each YouTube video from which comments were collected. 
 
 Note: In line with LSE's ethical guidelines and YouTube's data access and privacy considerations, the full dataset is not shared or published in this repository. However, users with approved access to the YouTube Data API can use the getcomments.rmd script to collect the comments, after which the remaining codebooks can be used to reproduce the subsequent analysis.
 
