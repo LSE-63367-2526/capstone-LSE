@@ -16,7 +16,7 @@ Details of the markdown files and codebooks in this repo are as follows:
 
 - "indobertweet-toxic-full-kaggle-final.ipynb" - This .ipynb file contains the code used to fine-tune the IndoBERTweet model for binary classification of toxic comments using the IndoDiscourse dataset, distinguishing between toxic and non-toxic comments.
 
-- "indobertweet_inference_full.ipynb" - This .ipynb file contains the code used to apply the fine-tuned models generated in "indobertweet-polar-full-kaggle-final.ipynb" and "indobertweet-toxic-full-kaggle-final.ipynb" to the collected comments. The code performs threshold tuning and classifies comments as polarising and/or toxic. 
+- "indobertweet_inference_precision.ipynb" - This .ipynb file contains the code used to apply the fine-tuned models generated in "indobertweet-polar-full-kaggle-final.ipynb" and "indobertweet-toxic-full-kaggle-final.ipynb" to the collected comments. The code performs threshold tuning (optimised for precision) and classifies comments as polarising and/or toxic. 
 
 - "videos_stats.pdf" - This .pdf file contains the video-level statistics of each YouTube video from which comments were collected. 
 
